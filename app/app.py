@@ -28,6 +28,7 @@ import psycopg2
 from flask import (Flask, request, session, redirect, url_for, render_template,
                    flash, send_file, abort)
 from fpdf import FPDF
+from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -159,6 +160,10 @@ def validate_application(data, doc_path):
             errors.append("%s is required" % label)
     if cleaned["block"] and cleaned["block"] not in BLOCKS:
         errors.append("block must be one of: " + ", ".join(BLOCKS))
+    if cleaned["gender"] not in ("Male", "Female", "Other"):
+        errors.append("gender must be one of: Male, Female, Other")
+    if cleaned["marital_status"] not in ("Married", "Unmarried", "Widowed"):
+        errors.append("marital status must be one of: Married, Unmarried, Widowed")
     if cleaned["bank_account"] and not re.fullmatch(r"\d{9,18}", cleaned["bank_account"]):
         errors.append("bank account number must be 9 to 18 digits")
     if cleaned["ifsc"] and not re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", cleaned["ifsc"]):
@@ -178,7 +183,12 @@ def validate_application(data, doc_path):
 
 
 def active_application(cur, mobile):
-    """The applicant's current live application, if any."""
+    """The applicant's current live application, if any.
+
+    Takes a per-mobile lock held until the caller commits, so two simultaneous
+    submissions for one mobile cannot both pass this check.
+    """
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (mobile,))
     cur.execute("SELECT id, application_no, status FROM applications "
                 "WHERE mobile = %s AND status IN %s "
                 "ORDER BY submitted_at DESC LIMIT 1", (mobile, ACTIVE_STATUSES))
@@ -339,9 +349,9 @@ def upload():
         if f is None or f.filename == "":
             flash("Please choose a file to upload (JPG, PNG or PDF, up to 5 MB).")
             return render_template("upload.html")
-        filename = f.filename.lower()
+        filename = secure_filename(f.filename or "").lower()
         content = f.read()
-        if not filename.rsplit(".", 1)[-1] in ("pdf", "jpg", "jpeg", "png"):
+        if "." not in filename or filename.rsplit(".", 1)[-1] not in ("pdf", "jpg", "jpeg", "png"):
             flash("Please upload a JPG, PNG or PDF file.")
             return render_template("upload.html")
         if len(content) > 5 * 1024 * 1024:
@@ -668,6 +678,13 @@ def admin_approve(app_id):
 @app.route("/admin/reject/<int:app_id>", methods=["POST"])
 def admin_reject(app_id):
     return _admin_decide(app_id, "REJECTED", request.form.get("note", ""))
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    flash("You have been signed out.")
+    return redirect(url_for("index"))
 
 
 from oauth import oauth as _oauth_blueprint   # noqa: E402  (needs the definitions above)
